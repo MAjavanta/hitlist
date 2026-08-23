@@ -8,7 +8,7 @@ def has_class_search_result_row(tag):
 
 def main() -> None:
     x = requests.get("https://store.steampowered.com/search?hwtype=0&category1=998")
-    soup = BeautifulSoup(x.text, "html.parser")
+    soup = BeautifulSoup(x.text, "lxml")
 
     for row in soup.find_all("a", class_="search_result_row"):
         appid = row["data-ds-appid"]

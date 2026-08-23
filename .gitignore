@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local data — the SQLite database and anything we scrape
+data/
+
+# Secrets
+.env
+
+# Reference copy of Steam's tag filter sidebar, saved by hand from the browser.
+# Useful to check parser selectors against offline; not worth committing.
+tag_filter_container.html
