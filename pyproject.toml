@@ -11,8 +11,8 @@ dependencies = [
     "beautifulsoup4>=4.15.0",
     "lxml>=6.1.1",
     "requests>=2.34.2",
-    "sqlmodel>=0.0.39",
-    "typer>=0.27.1",
+    "sqlmodel>=0.0.46",
+    "typer>=0.27.2",
 ]
 
 [project.scripts]

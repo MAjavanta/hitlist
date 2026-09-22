@@ -18,6 +18,87 @@ frontend.
 
 ---
 
+## 0. What you are actually building
+
+Worth being concrete about the shape of this thing before writing any of it, because "poll Twitch
+every hour" can be built several ways and most of them are worse.
+
+You are building **three separate things**:
+
+1. **A database.** This is the asset — the thing that has value and that nobody can buy
+   retroactively. A SQLite file on a server. Everything else exists to fill it.
+2. **A command line tool.** Not a service, not a daemon, not a web app. A program that starts,
+   does one job, writes to the database, and exits. `hitlist twitch poll-streams` runs for
+   perhaps thirty seconds and terminates.
+3. **A scheduler.** Cron, which already exists on the server and whose entire purpose is running
+   shell commands on a timetable.
+
+So: a CLI tool on a VPS, run by cron. The whole scheduling system is one crontab line:
+
+```
+0 * * * * cd /srv/hitlist && /usr/local/bin/uv run hitlist twitch poll-streams >> /srv/hitlist/poll.log 2>&1
+```
+
+That is not a simplification of the real deployment. That is the real deployment.
+
+### Short-lived processes, not a loop
+
+The obvious way to write "every hour" is a process that never exits:
+
+```python
+while True:
+    poll()
+    time.sleep(3600)
+```
+
+**Do not build this.** It reads as simpler and behaves far worse: if it dies at 2am it stays dead
+until you notice, it holds memory and a database connection open indefinitely, and deploying a
+change means restarting it and reasoning about in-flight state. A short-lived process under cron
+has none of those failure modes — a crash costs exactly one run, the next run starts from a clean
+process, and deploying is `git pull` with no restart at all.
+
+The rule: **your Python never sleeps and never loops forever.** It does one pass and exits. Cron
+owns the clock.
+
+### Packaging: there isn't any
+
+Nothing gets published. No PyPI, no Docker needed, no build step. Deployment is:
+
+```sh
+git clone <repo> /srv/hitlist
+cd /srv/hitlist
+uv sync
+```
+
+`uv sync` creates the virtualenv and installs the project into it, including the `hitlist`
+executable declared by `[project.scripts]` in `pyproject.toml`. That one line is the entire
+packaging story — it is what turns "some Python files" into "a command". Updating the server is
+`git pull && uv sync`.
+
+### How it fits together at runtime
+
+```
+cron (hourly) ──> uv run hitlist twitch poll-streams ──> Twitch API
+                                │
+cron (weekly) ──> uv run hitlist steam sync-games ────> Steam
+                                │
+                                v
+                        data/hitlist.db   <── you, by hand, with SQL
+                                │
+                                v
+                     (much later) C# API ──> React UI
+```
+
+### The one property every command needs
+
+**Safe to run twice.** Cron will occasionally double-fire, you will rerun things by hand, and a
+deploy will overlap a scheduled run sooner or later. Write upserts rather than inserts and this
+stops being something you have to think about. It is also why every command below reads its
+inputs from the database or config rather than from the previous command's output — there is no
+pipeline, just independent jobs that each leave the database a bit more complete.
+
+---
+
 ## 1. Review of the plan
 
 **The core idea is sound and the sequencing is right.** The genuinely hard, genuinely valuable
@@ -128,19 +209,20 @@ Other verified counts for reference: Psychological Horror (1721) 14,760 · Actio
 (42804) 10,674 · Immersive Sim (9204) 9,912 · Souls-like (29482) 3,233 · Extraction Shooter
 (1199779) 253.
 
-### 3.1 Repo hygiene — DONE
+### 3.1 Repo hygiene (do first, ~15 min)
 
-- Root `.gitignore` covering `__pycache__/`, `*.py[cod]`, `.venv/`, `data/`, `.env`, and
-  `tag_filter_container.html`.
-- `git rm --cached src/hitlist/__pycache__/__init__.cpython-312.pyc` — it was **tracked**.
-- `.venv` was never tracked: uv writes a `.venv/.gitignore` containing `*`, so it excludes itself.
-- `tag_filter_container.html` is gitignored rather than committed. It stays on disk as an offline
-  reference for checking parser selectors; delete it whenever you like.
-- Dependencies added with **uv, not pip**: `uv add sqlmodel typer`. Deliberately *not* added yet —
-  `tenacity` (retries aren't a problem yet) and `pydantic-settings` (a plain `config.py` of module
-  constants is centralised and needs no dependency; add settings-from-env when Twitch secrets
-  arrive). Run everything with `uv run`; never `uv pip install` for project deps.
-- `README.md` now lists the commands, and gains a row each time we build one.
+- Add a root `.gitignore` covering `__pycache__/`, `*.py[cod]`, `.venv/`, `data/`, `.env`, and
+  `tag_filter_container.html`. **Already done.**
+- `git rm --cached src/hitlist/__pycache__/__init__.cpython-312.pyc` — it was tracked by accident.
+  **Already done.**
+- `.venv` was never tracked, and doesn't need to be: uv writes a `.venv/.gitignore` containing
+  `*`, so it excludes itself.
+- Add the database dependency when you start the database: `uv add sqlmodel`. Add a CLI library
+  when you start the CLI — `typer` is the ergonomic choice and gives you nested subcommands
+  (`hitlist db init`) almost for free, but stdlib `argparse` works and adds no dependency. Either
+  is defensible; pick and move on.
+- Keep `README.md` updated with each command as you build it. It is the file you will actually
+  reread in three months.
 
 ### 3.2 On when and how to structure
 
@@ -300,12 +382,16 @@ Each step is the simplest thing that works. Retries, resumability, rate limiting
 archiving are all explicitly **not** in scope until their absence causes an actual problem.
 
 **Step 1 — DB + tag lookup.** `hitlist db init` creates `data/hitlist.db`. Then
-`hitlist steam sync-tags` **fetches the tag sidebar live from Steam** — no local file, no
-`--from-file` flag. Any search page carries the full sidebar. Select
-`div.tab_filter_control_row`, read `data-value` and `data-loc`, `.strip()` the names (some have
-trailing spaces), skip anything where `data-param != "tags"`. That yields 430 rows with no dedup
-needed — the outer div fully describes each tag, and the inner spans only repeat it. Ignore
-`tab_filter_control_count`; only ~25 are populated and they're relative to the current query.
+`hitlist steam sync-tags` fetches the tag sidebar live from Steam — no local file, no
+`--from-file` flag.
+
+Note this hits a **different URL from step 2**: the sidebar is only on the plain search page
+(`store.steampowered.com/search/?tags=1667&category1=998`), not in the `infinite=1` JSON, which
+returns `results_html` and nothing else. Scope your selection to `#TagFilter_Container` or filter
+on `data-param="tags"` — the live page has 604 `tab_filter_control_row` divs and only ~428 are
+tags, the rest being language, OS and Steam Deck filters. Match the row `div`s rather than any
+element with that attribute, or the nested include/exclude spans give you duplicates. `.strip()`
+the names. Full details in the appendix.
 
 **Step 2 — Steam game sweep.** `hitlist steam sync-games`, reading the seed tag list from
 `config.py`. Loop `start=0, 100, 200…` against
@@ -451,6 +537,48 @@ So while you're on SQLite, a VPS is both the cheapest and the simplest option, a
 PaaS only becomes attractive at stage 9, once you've moved to Postgres and the database lives
 somewhere other than the filesystem — which is also roughly when the C# API needs hosting anyway.
 
+### Deploying to the VPS, concretely
+
+Once you have a box (Hetzner CX22 or similar, Ubuntu):
+
+```sh
+# as a non-root user on the server
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone <your repo> ~/hitlist
+cd ~/hitlist
+uv sync
+uv run hitlist db init
+```
+
+Then `crontab -e` and add the schedule. Use absolute paths — cron runs with a minimal environment
+and will not find `uv` on `PATH`:
+
+```
+0 * * * * cd $HOME/hitlist && $HOME/.local/bin/uv run hitlist twitch poll-streams >> $HOME/hitlist/logs/poll.log 2>&1
+30 4 * * 1 cd $HOME/hitlist && $HOME/.local/bin/uv run hitlist steam sync-games >> $HOME/hitlist/logs/steam.log 2>&1
+45 5 * * 1 cd $HOME/hitlist && $HOME/.local/bin/uv run hitlist twitch resolve-games >> $HOME/hitlist/logs/resolve.log 2>&1
+```
+
+Reading a crontab line: five time fields then the command. `0 * * * *` is minute 0 of every hour;
+`30 4 * * 1` is 04:30 on Mondays. `>> file 2>&1` appends both normal output and errors to a log,
+which is the only debugging you get when something fails at 3am.
+
+Secrets go in `.env` on the server, which is gitignored and never committed. Read it in
+`config.py` — at that point `uv add pydantic-settings` earns its place, or `os.environ` with a
+`python-dotenv` call if you prefer fewer moving parts.
+
+Three things that are easy to skip and will bite:
+
+- **Set the server's timezone to UTC** (`sudo timedatectl set-timezone UTC`) so cron times and
+  stored timestamps agree. Mixing them is a genuinely nasty class of bug.
+- **Back up the database.** A nightly `sqlite3 ~/hitlist/data/hitlist.db ".backup ~/backups/$(date +%F).db"` plus
+  a weekly copy pulled down to your laptop. The time series is unrecoverable if the disk dies.
+- **Check the logs in week one.** A cron job that fails silently every hour looks exactly like a
+  cron job that works, until you query the database and find it empty.
+
+Deploying a change afterwards is `git pull && uv sync`. No restart, because nothing is running —
+the next cron firing picks up the new code.
+
 ### Refresh cadences
 
 | Data | Cadence | Why |
@@ -495,3 +623,176 @@ points/min and your hourly poll costs on the order of 20 requests; you have enor
 8. After ~3 days of polling: `uv run hitlist export creators --tags 1667 --out horror.csv`, then
    open the CSV and sanity-check the top 20 against Twitch by hand. This is the real test — if
    the names look wrong to you, they'll look wrong to a dev.
+
+---
+
+## Appendix: API reference (verified)
+
+Everything here was checked against the live endpoints rather than recalled, on 2026-09-23.
+
+### Steam: the search results JSON endpoint
+
+```
+https://store.steampowered.com/search/results/
+    ?query
+    &start=0          # offset; paging is uncapped (start=21800 verified working)
+    &count=100        # page size, MAX 100 — asking for 200 silently returns 100
+    &infinite=1       # return JSON instead of a rendered page
+    &hwtype=0
+    &category1=998    # games only: excludes DLC, soundtracks, demos, videos
+    &ndl=1            # drop the default "English only" filter
+    &tags=1667        # tag id; several are %2C-separated and AND together, not OR
+```
+
+Returns JSON with four keys:
+
+| Key | Meaning |
+| --- | --- |
+| `success` | 1 |
+| `total_count` | total matching games — **read this first to plan the run** |
+| `start` | echo of the offset you asked for |
+| `results_html` | an HTML fragment containing the rows, which you parse |
+
+Loop `start` by 100 until `start >= total_count`. Horror (1667) is 21,838 games = 219 requests.
+
+Without `infinite=1` the plain `/search/` page returns only 25 per page via `&page=N`, so the
+JSON endpoint is 4× more efficient and gives you `total_count` for free.
+
+**What each row carries.** Rows are `<a class="search_result_row">` and the useful data is spread
+between attributes on the anchor and elements inside it:
+
+| Where | What |
+| --- | --- |
+| `data-ds-appid` | Steam appid — your primary key |
+| `data-ds-tagids` | **JSON array of the top 7 tag ids, in rank order** |
+| `span.title` | game title |
+| `div.search_released` | release date as displayed, e.g. `20 Aug, 2026` or `Coming soon` |
+| `data-price-final` | price in cents, e.g. `3999` |
+| `data-tooltip-html` | `Very Positive<br>85% of the 789 user reviews for this game are positive.` (HTML-escaped) |
+
+The review tooltip is the one that needs a regex, and it's worth the trouble: review count is the
+best available proxy for whether a game is big enough to have been streamed, which is what decides
+which games are worth trying to match to Twitch.
+
+**Why top-7 and the tag filter disagree.** The `tags=` filter matches against all ~20 of a game's
+tags, so it has high recall and poor precision — PEAK comes back under `tags=1667` because Horror
+is its 17th tag. `data-ds-tagids` is the top 7 by vote weight, so it has high precision. Use the
+filter to *discover* games and the top-7 to *describe* them. Keep the array order: a game's #1 tag
+means considerably more than its #7.
+
+### Steam: where the tag list comes from
+
+**Not from the JSON endpoint.** `search/results/?infinite=1` returns `results_html` only — zero
+tag-filter markup in it. The sidebar lives on the *plain* search page:
+
+```
+https://store.steampowered.com/search/?tags=1667&category1=998
+```
+
+inside `<div id="TagFilter_Container">`. Each tag is one `div.tab_filter_control_row` carrying
+`data-value` (the tag id) and `data-loc` (the name). Roughly 430 tags.
+
+Three traps, all verified:
+
+1. **Other filter sections reuse the same class.** The live page has **604**
+   `tab_filter_control_row` divs, of which only ~428 are tags — the rest are language, OS,
+   player-count and Steam Deck filters. Selecting on the class alone silently mixes "Simplified
+   Chinese" and "Windows" into your tag table. Filter on `data-param="tags"`, or scope the
+   selection to `#TagFilter_Container` first.
+2. **Each tag appears twice more.** The row also contains a nested include `<span>` with the same
+   `data-param="tags"` and an exclude `<span>` with `data-param="untags"`. Match the **row divs**
+   specifically, not any element with the attribute, or you'll get duplicates.
+3. **Names need `.strip()`.** A few have trailing whitespace (`"Parody "`, `"Dystopian "`).
+
+Ignore `tab_filter_control_count` — only ~25 are populated and those are counts relative to the
+current query, not global.
+
+If you hit a tag id that isn't in your lookup table, searching `&tags=<id>` renders a label with
+the name in it (`div.searchtag` → `span.label`), so unknown ids are recoverable.
+
+### Steam: politeness and robots.txt
+
+`store.steampowered.com/robots.txt`, checked 2026-09-23:
+
+```
+User-Agent: *
+Disallow: /share/
+Disallow: /news/externalpost/
+Disallow: /account/emailoptout/?*token=
+Disallow: /account/notificationsettings/?*token=
+Disallow: /login/?*guestpasskey=
+Disallow: /join/?*redir=
+Disallow: /account/ackgift/
+Disallow: /email/
+Disallow: /widget/
+```
+
+**`/search/` and `/search/results/` are not disallowed.** Every excluded path is either a
+state-changing account action (note the `?token=` one-click variants) or an embed endpoint that
+would generate unbounded junk URLs. None of it concerns catalogue data.
+
+There is **no `Crawl-delay`**, so no stated rate is being violated — but equally none is
+sanctioned, so the sleep between requests is judgement rather than compliance. A weekly sweep of
+~330 requests at one every second or two is invisible against the traffic that page already takes.
+
+Because the exclusions target account actions, don't follow links out of search results
+indiscriminately if you later scrape individual game pages. Stay on paths you construct yourself.
+
+Note also that robots.txt and the Steam Subscriber Agreement are different questions, and the
+latter is stricter in principle, as on almost any site. Low-volume reads of public store listings
+are the same territory price trackers and SteamDB-style tools operate in openly, but "robots.txt
+allows it" is not the same claim as "the terms allow it".
+
+**User-Agent.** Verified that requests succeed with no User-Agent, the default
+`python-requests/2.x`, and a browser one — all 200. A custom User-Agent is therefore **not**
+required to avoid blocking. Set one that names the project anyway, so your traffic is identifiable
+as something other than an anonymous bot. Courtesy, not a workaround.
+
+### Twitch: Helix API
+
+**Auth.** Register an app at dev.twitch.tv for a client id and secret, then:
+
+```
+POST https://id.twitch.tv/oauth2/token
+    ?client_id=...&client_secret=...&grant_type=client_credentials
+```
+
+That returns an *app access token* (valid ~60 days), which is all you need — none of the endpoints
+below require a user to log in. Every request then carries two headers:
+
+```
+Client-Id: <your client id>
+Authorization: Bearer <token>
+```
+
+Rate limit is 800 points/minute; ordinary calls cost 1 point. An hourly poll costs ~20 requests,
+so you have enormous headroom.
+
+**Get Streams** — `GET https://api.twitch.tv/helix/streams`
+
+- Accepts **up to 100 `game_id` parameters in a single request**, repeated:
+  `?game_id=123&game_id=456&...`. This is the big one: polling 1,000 games costs ~10 requests plus
+  cursor pages, not 1,000.
+- `first=100` max per page; follow `pagination.cursor` via `after=` until it's absent.
+- Returns `id` (stream id, stable for one broadcast), `user_id`, `user_login`, `user_name`,
+  `game_id`, `game_name`, `title`, `viewer_count`, `started_at`, `language`, `tags`.
+- **Live only.** There is no historical version of this. Every hour you don't poll is gone.
+
+**Get Games** — `GET https://api.twitch.tv/helix/games` — accepts up to 100 each of `id`, `name`,
+or `igdb_id` per request. Returns `id`, `name`, `box_art_url`. Note Twitch category ids are
+**strings**, not ints. `name` matching is exact; `GET helix/search/categories?query=` is the fuzzy
+alternative.
+
+**Get Clips** — `GET https://api.twitch.tv/helix/clips` — `game_id` plus `started_at` / `ended_at`
+as RFC3339. `first=100` max, results ordered by view count descending. Returns `broadcaster_id`
+(the streamer — this is the one you want), `creator_id` (whoever clipped it), `view_count`,
+`created_at`, `title`, `url`, `duration`.
+
+Because results are view-ordered and a window realistically surfaces only ~1,000 clips, query
+**month by month** rather than a year at once, or you only ever see the same top clips and miss
+exactly the mid-tail creators you're looking for.
+
+**Unverified — spike before relying on it.** IGDB is Twitch-owned and accepts the *same* client
+credentials. Its `external_games` data is reported to map Steam appids to IGDB ids, which
+`helix/games?igdb_id=` then maps to Twitch categories — an exact join instead of fuzzy name
+matching. Check it against 50 games you know before building on it.
