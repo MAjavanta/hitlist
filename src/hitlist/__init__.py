@@ -7,11 +7,12 @@ def has_class_search_result_row(tag):
 
 
 def main() -> None:
-    x = requests.get("https://store.steampowered.com/search?hwtype=0&category1=998")
+    print("hello world")
+    """ x = requests.get("https://store.steampowered.com/search?hwtype=0&category1=998")
     soup = BeautifulSoup(x.text, "lxml")
 
     for row in soup.find_all("a", class_="search_result_row"):
         appid = row["data-ds-appid"]
         tags = row["data-ds-tagids"]
         title = row.find("span", class_="title").get_text(strip=True)
-        print(title, appid, tags)
+        print(title, appid, tags) """
