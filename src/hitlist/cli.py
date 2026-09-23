@@ -1,7 +1,11 @@
 import typer
 from rich import print
+from sqlmodel import SQLModel
 
+from . import models  # noqa: F401
+from .db import engine
 from .steam import get_tags
+
 
 app = typer.Typer()
 db_app = typer.Typer()
@@ -26,3 +30,4 @@ def tags():
 @db_app.command()
 def init() -> None:
     print("Initialising database")
+    SQLModel.metadata.create_all(engine)
