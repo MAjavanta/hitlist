@@ -1,11 +1,10 @@
 import typer
 from rich import print
-from sqlmodel import SQLModel
+from sqlmodel import Session, SQLModel
 
 from . import models  # noqa: F401
 from .db import engine
 from .steam import get_tags
-
 
 app = typer.Typer()
 db_app = typer.Typer()
@@ -24,7 +23,13 @@ def ping() -> None:
 
 @steam_app.command()
 def tags():
-    get_tags()
+    tags = get_tags()
+
+    with Session(engine) as session:
+        for tag in tags:
+            session.add(tag)
+
+        session.commit()
 
 
 @db_app.command()
