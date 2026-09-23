@@ -2,9 +2,9 @@ import typer
 from rich import print
 from sqlmodel import Session, SQLModel
 
-from . import models  # noqa: F401
+from . import models
 from .db import engine
-from .steam import get_tags
+from .steam import get_games, get_tags
 
 app = typer.Typer()
 db_app = typer.Typer()
@@ -22,14 +22,22 @@ def ping() -> None:
 
 
 @steam_app.command()
-def tags():
-    tags = get_tags()
+def tags(load_db: bool = False):
+    tags: list[models.steam_tags] = get_tags()
 
-    with Session(engine) as session:
-        for tag in tags:
-            session.add(tag)
+    if load_db:
+        with Session(engine) as session:
+            for tag in tags:
+                session.add(tag)
 
-        session.commit()
+            session.commit()
+    else:
+        print(tags)
+
+
+@steam_app.command()
+def games(tag_id: int):
+    get_games(tag_id)
 
 
 @db_app.command()
