@@ -4,7 +4,7 @@ from sqlmodel import Session, SQLModel
 
 from . import models
 from .db import engine
-from .steam import get_games, get_tags
+from .steam import get_games, get_tags, test_game
 
 app = typer.Typer()
 db_app = typer.Typer()
@@ -39,6 +39,11 @@ def tags(load_db: bool = False):
 def games(tag_id: int):
     games_list = get_games(tag_id)
     print(games_list)
+
+
+@steam_app.command()
+def game_test():
+    test_game()
 
 
 @db_app.command()
