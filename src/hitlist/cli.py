@@ -23,7 +23,7 @@ def ping() -> None:
 
 @steam_app.command()
 def tags(load_db: bool = False):
-    tags: list[models.steam_tags] = get_tags()
+    tags: list[models.steam_tag] = get_tags()
 
     if load_db:
         with Session(engine) as session:
@@ -37,8 +37,9 @@ def tags(load_db: bool = False):
 
 @steam_app.command()
 def games(tag_id: int):
-    games_list = get_games(tag_id)
+    games_list, games_tags = get_games(tag_id)
     print(games_list)
+    print(games_tags)
 
 
 @steam_app.command()
