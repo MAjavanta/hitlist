@@ -20,30 +20,32 @@ def get_tags() -> list[steam_tags]:
 
 
 def get_games(tag_id: int):
-    resp = requests.get(
-        BASE_URL + "results/",
-        params={
-            "infinite": 1,
-            "category1": 998,
-            "tags": tag_id,
-            "ignore_preferences": 1,
-            "count": 100,
-        },
-    )
-    data = resp.json()
-    total_count = data["total_count"]
-    soup = BeautifulSoup(data["results_html"], "lxml")
-    print(total_count)
+    games_list = []
+    for start in range(0, 300, 100):
+        resp = requests.get(
+            BASE_URL + "results/",
+            params={
+                "infinite": 1,
+                "category1": 998,
+                "tags": tag_id,
+                "ignore_preferences": 1,
+                "count": 100,
+                "start": start,
+            },
+        )
+        data = resp.json()
+        soup = BeautifulSoup(data["results_html"], "lxml")
 
-    games = soup.find_all("a", class_="search_result_row")
+        games = soup.find_all("a", class_="search_result_row")
+        print(f"Start: {start} - games: {len(games)}")
+        for game_row in games:
+            game_id = game_row["data-ds-appid"]
+            game_tags = game_row["data-ds-tagids"]
+            title_span = game_row.find("span", class_="title")
+            if title_span is not None:
+                game_title = title_span.text
+            else:
+                game_title = "TITLE NOT FOUND"
 
-    for game_row in games:
-        game_id = game_row["data-ds-appid"]
-        game_tags = game_row["data-ds-tagids"]
-        title_span = game_row.find("span", class_="title")
-        if title_span is not None:
-            game_title = title_span.text
-        else:
-            game_title = "TITLE NOT FOUND"
-
-        print(f"{game_title} - {game_id}: {game_tags}")
+            games_list.append((game_id, game_title, game_tags))
+    return games_list

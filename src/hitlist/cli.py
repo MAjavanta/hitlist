@@ -37,7 +37,8 @@ def tags(load_db: bool = False):
 
 @steam_app.command()
 def games(tag_id: int):
-    get_games(tag_id)
+    games_list = get_games(tag_id)
+    print(games_list)
 
 
 @db_app.command()
